@@ -8,19 +8,20 @@ set -euo pipefail
 #
 # What this does:
 #   1. Installs Wine 11 from WineHQ (if not present)
-#   2. Installs 32-bit NVIDIA GL libraries (manual extract, no apt — safe for GDM)
-#   3. Creates a 64-bit Wine prefix with native Wayland support
-#   4. Installs Windows core fonts (fixes CEF dwrite crash)
-#   5. Runs the ShootersPool NSIS installer silently
-#   6. Configures gfx.ini for fullscreen without decorations
+#   2. Creates a 64-bit Wine prefix with native Wayland support
+#   3. Installs Windows core fonts (fixes CEF dwrite crash)
+#   4. Runs the ShootersPool NSIS installer (GUI click-through)
+#   5. Patches binary to disable Steam auth (steam=0)
+#   6. Creates data→Data case-sensitivity symlink
+#   7. Configures Wayland driver: no decorations
+#   8. Writes gfx.ini for fullscreen at native resolution
 #
-# Why Wine 11, not Proton?
-#   Proton strips winewayland.so. The game crashes under XWayland with
-#   IncorrectSoundFormat. Only Wine 11's native Wayland driver avoids this.
-#
-# Why manual 32-bit NVIDIA libs?
-#   apt install libnvidia-gl-590:i386 pulls in libnvidia-egl-wayland1:i386
-#   which breaks GDM. We extract just the GL libraries from the .deb instead.
+# Key discoveries:
+#   - Game MUST be launched from bin/ directory (uses relative ..\\data\\)
+#   - Sound files (.wavx/.oggx) are encrypted, no symlinks needed
+#   - Binary contains steam=1 in login URL, must be patched to steam=0
+#   - Wine's Wayland driver avoids crashes that occur under X11
+#   - NSIS installer /S flag works only if launched from correct path
 # =============================================================================
 
 INSTALLER="${1:?Usage: install.sh /path/to/ShootersPool_Setup.exe}"
@@ -34,15 +35,10 @@ GAME_REL="drive_c/Program Files (x86)/ShootersPool"
 GAME_DIR="$PREFIX/$GAME_REL"
 GAME_BIN="$GAME_DIR/bin"
 GAME_EXE="$GAME_BIN/ShootersPool Online.exe"
-NVIDIA_DRIVER_VER="590.48.01"
-LIB32_DIR="/usr/lib/i386-linux-gnu"
 
 # --- Helpers ------------------------------------------------------------------
-need_sudo() { echo "  (requires sudo)"; }
-
 cleanup_wine() {
-    "$WINESERVER" -k 2>/dev/null || true
-    kill -9 $(ps aux | grep -i "wine\|shooters\|wineserver\|winedevice\|CrUtility\|Graphics" | grep -v grep | awk '{print $2}') 2>/dev/null || true
+    WINEPREFIX="$PREFIX" "$WINESERVER" -k 2>/dev/null || true
     sleep 2
 }
 
@@ -52,11 +48,10 @@ echo "=== ShootersPool Installer (Wine 11 + Wayland) ==="
 [[ -f "$INSTALLER" ]] || { echo "ERROR: Installer not found: $INSTALLER"; exit 1; }
 
 # --- 1. Install Wine 11 from WineHQ ------------------------------------------
-echo "[1/6] Checking Wine 11..."
+echo "[1/8] Checking Wine 11..."
 if [[ -x "$WINE" ]] && "$WINE" --version 2>/dev/null | grep -q "wine-11"; then
     echo "  Wine 11 already installed: $($WINE --version)"
 else
-    need_sudo
     echo "  Adding WineHQ repository..."
     sudo dpkg --add-architecture i386
     sudo mkdir -pm755 /etc/apt/keyrings
@@ -69,105 +64,60 @@ else
     echo "  Wine installed: $($WINE --version)"
 fi
 
-# --- 2. Install 32-bit NVIDIA GL libraries -----------------------------------
-echo "[2/6] Checking 32-bit NVIDIA GL libraries..."
-if [[ -f "$LIB32_DIR/libGLX_nvidia.so.$NVIDIA_DRIVER_VER" ]]; then
-    echo "  Already present"
-else
-    need_sudo
-    echo "  Downloading libnvidia-gl-590:i386 .deb (extract only, not installed)..."
-    TMPDIR=$(mktemp -d)
-    trap "rm -rf $TMPDIR" EXIT
-
-    apt download "libnvidia-gl-590:i386" 2>/dev/null || {
-        # Fallback: download from archive
-        DEB_URL=$(apt-cache show "libnvidia-gl-590:i386" 2>/dev/null | grep "^Filename:" | head -1 | awk '{print $2}')
-        if [[ -n "$DEB_URL" ]]; then
-            wget -qO "$TMPDIR/libnvidia-gl.deb" "http://archive.ubuntu.com/ubuntu/$DEB_URL"
-        else
-            echo "ERROR: Cannot download libnvidia-gl-590:i386"; exit 1
-        fi
-    }
-    DEB_FILE=$(ls libnvidia-gl-590_*_i386.deb 2>/dev/null || ls "$TMPDIR"/*.deb 2>/dev/null)
-    [[ -f "$DEB_FILE" ]] || { echo "ERROR: .deb download failed"; exit 1; }
-
-    echo "  Extracting 32-bit GL libraries..."
-    dpkg-deb -x "$DEB_FILE" "$TMPDIR/extract"
-    rm -f "$DEB_FILE"
-
-    # Copy libraries
-    LIBS=(
-        "libGLX_nvidia.so.$NVIDIA_DRIVER_VER"
-        "libEGL_nvidia.so.$NVIDIA_DRIVER_VER"
-        "libnvidia-glcore.so.$NVIDIA_DRIVER_VER"
-        "libnvidia-tls.so.$NVIDIA_DRIVER_VER"
-        "libnvidia-glsi.so.$NVIDIA_DRIVER_VER"
-        "libnvidia-gpucomp.so.$NVIDIA_DRIVER_VER"
-        "libnvidia-glvkspirv.so.$NVIDIA_DRIVER_VER"
-        "libnvidia-eglcore.so.$NVIDIA_DRIVER_VER"
-        "libGLESv2_nvidia.so.$NVIDIA_DRIVER_VER"
-    )
-    for lib in "${LIBS[@]}"; do
-        SRC=$(find "$TMPDIR/extract" -name "$lib" 2>/dev/null | head -1)
-        if [[ -f "$SRC" ]]; then
-            sudo cp "$SRC" "$LIB32_DIR/$lib"
-        else
-            echo "  WARN: $lib not found in .deb"
-        fi
-    done
-
-    # Create symlinks
-    sudo ln -sf "libGLX_nvidia.so.$NVIDIA_DRIVER_VER" "$LIB32_DIR/libGLX_nvidia.so.0"
-    sudo ln -sf "libEGL_nvidia.so.$NVIDIA_DRIVER_VER" "$LIB32_DIR/libEGL_nvidia.so.0"
-    sudo ln -sf "libGLESv2_nvidia.so.$NVIDIA_DRIVER_VER" "$LIB32_DIR/libGLESv2_nvidia.so.2"
-    sudo ldconfig
-
-    trap - EXIT
-    rm -rf "$TMPDIR"
-    echo "  32-bit NVIDIA GL libraries installed"
-fi
-
-# --- 3. Create 64-bit Wine prefix --------------------------------------------
-echo "[3/6] Creating 64-bit Wine prefix..."
+# --- 2. Create 64-bit Wine prefix --------------------------------------------
+echo "[2/8] Creating 64-bit Wine prefix..."
 cleanup_wine
 rm -rf "$PREFIX"
 env -u DISPLAY WINEPREFIX="$PREFIX" WINEARCH=win64 "$WINE" wineboot --init 2>/dev/null
 "$WINESERVER" -w 2>/dev/null || true
 sleep 2
-
-# Configure Wine for native Wayland
-env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
-    "HKCU\\Software\\Wine\\Drivers" /v Graphics /t REG_SZ /d wayland /f 2>/dev/null
-env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
-    "HKCU\\Software\\Wine\\X11 Driver" /v Decorated /t REG_SZ /d N /f 2>/dev/null
-"$WINESERVER" -w 2>/dev/null || true
 echo "  Prefix created: $PREFIX (win64)"
 
+# --- 3. Configure Wine for native Wayland -------------------------------------
+echo "[3/8] Configuring Wine for Wayland..."
+env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
+    "HKCU\\Software\\Wine\\Drivers" /v Graphics /t REG_SZ /d wayland /f 2>/dev/null
+# No window decorations (titlebar/border)
+env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
+    "HKCU\\Software\\Wine\\Wayland Driver" /v Decorated /t REG_SZ /d N /f 2>/dev/null
+"$WINESERVER" -w 2>/dev/null || true
+echo "  Wayland driver configured, decorations disabled"
+
 # --- 4. Install core fonts ---------------------------------------------------
-echo "[4/6] Installing Windows core fonts..."
+echo "[4/8] Installing Windows core fonts..."
 command -v winetricks >/dev/null || {
     echo "  Installing winetricks..."
     sudo wget -qO /usr/local/bin/winetricks https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks
     sudo chmod +x /usr/local/bin/winetricks
 }
 env -u DISPLAY WINEPREFIX="$PREFIX" WINE="$WINE" winetricks -q corefonts 2>&1 | tail -3 || {
-    echo "  WARN: winetricks corefonts failed, trying manual install..."
-    FONT_DIR="$PREFIX/drive_c/windows/Fonts"
-    mkdir -p "$FONT_DIR"
-    for font_url in \
-        "https://downloads.sourceforge.net/corefonts/arial32.exe" \
-        "https://downloads.sourceforge.net/corefonts/times32.exe" \
-        "https://downloads.sourceforge.net/corefonts/verdana32.exe"; do
-        wget -qO /tmp/font.exe "$font_url" 2>/dev/null && \
-            cabextract -q -d "$FONT_DIR" /tmp/font.exe 2>/dev/null || true
-    done
-    rm -f /tmp/font.exe
+    echo "  WARN: winetricks corefonts had issues (may still work)"
 }
 "$WINESERVER" -w 2>/dev/null || true
+echo "  Core fonts installed"
 
-# --- 5. Run the NSIS installer ------------------------------------------------
-echo "[5/6] Running game installer (silent, may take a few minutes)..."
-env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" "$INSTALLER" /S
+# --- 5. Run NSIS installer ----------------------------------------------------
+echo "[5/8] Running game installer..."
+echo "  NOTE: The NSIS installer may show a GUI. If it does, click through:"
+echo "    Language → OK → Next → I Agree → Install → wait ~60s → Close"
+echo "  Trying silent install first..."
+
+env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" "$INSTALLER" /S 2>/dev/null &
+INST_PID=$!
+
+# Wait up to 120s for installer to finish
+for i in $(seq 1 120); do
+    if ! kill -0 "$INST_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+# If still running after 120s, it's probably waiting for GUI input
+if kill -0 "$INST_PID" 2>/dev/null; then
+    echo "  Silent install timed out — installer needs GUI interaction"
+    echo "  Please complete the installer manually, then press Enter here"
+    read -r
+fi
 "$WINESERVER" -w 2>/dev/null || true
 sleep 3
 
@@ -180,39 +130,45 @@ if [[ ! -f "$GAME_EXE" ]]; then
         GAME_EXE="$GAME_BIN/ShootersPool Online.exe"
     fi
 fi
-[[ -f "$GAME_EXE" ]] || { echo "ERROR: Game exe not found. Check: ls \"$PREFIX/drive_c/Program Files\"*/"; exit 1; }
+[[ -f "$GAME_EXE" ]] || { echo "ERROR: Game exe not found after install."; exit 1; }
 echo "  Installed to: $GAME_DIR"
+sync  # Ensure binary is fully flushed to disk before patching
 
-# --- 6. Configure gfx.ini for fullscreen ------------------------------------
-echo "[6/6] Configuring fullscreen..."
-# Detect display resolution and refresh rate
-RES_X=$(xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}' | cut -dx -f1 || echo "2560")
-RES_Y=$(xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}' | cut -dx -f2 || echo "1440")
-REFRESH=$(xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1}' | cut -d. -f1 || echo "165")
-# Fallback: use Wayland-native detection
-if [[ -z "$RES_X" || "$RES_X" == "0" ]]; then
-    RES_INFO=$(wlr-randr 2>/dev/null || gnome-randr 2>/dev/null || true)
-    RES_X="${RES_X:-2560}"
-    RES_Y="${RES_Y:-1440}"
-    REFRESH="${REFRESH:-165}"
+# --- 6. Patch binary: steam=1 → steam=0 --------------------------------------
+echo "[6/8] Patching Steam auth bypass..."
+if grep -aq 'steam=1' "$GAME_EXE"; then
+    sed -i 's/steam=1/steam=0/g' "$GAME_EXE"
+    echo "  Patched: steam=1 → steam=0"
+elif grep -aq 'steam=0' "$GAME_EXE"; then
+    echo "  Already patched"
+else
+    echo "  WARN: steam= string not found in binary"
 fi
+
+# --- 7. Create data→Data case-sensitivity symlink ----------------------------
+echo "[7/8] Fixing case-sensitivity..."
+if [[ -d "$GAME_DIR/Data" && ! -e "$GAME_DIR/data" ]]; then
+    ln -s Data "$GAME_DIR/data"
+    echo "  Created symlink: data → Data"
+elif [[ -L "$GAME_DIR/data" ]]; then
+    echo "  Symlink already exists"
+else
+    echo "  WARN: Data directory layout unexpected"
+fi
+
+# --- 8. Write gfx.ini --------------------------------------------------------
+echo "[8/8] Configuring graphics..."
+# Detect resolution
+RES_X=$(DISPLAY=:1 xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1}' | cut -dx -f1 || echo "")
+RES_Y=$(DISPLAY=:1 xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1}' | cut -dx -f2 || echo "")
+REFRESH=$(DISPLAY=:1 xrandr 2>/dev/null | grep '\*' | head -1 | awk '{for(i=1;i<=NF;i++) if($i ~ /\*/) print $i}' | tr -d '*+' | cut -d. -f1 || echo "")
+RES_X="${RES_X:-2560}"
+RES_Y="${RES_Y:-1440}"
+REFRESH="${REFRESH:-165}"
 
 GFX_DIR="$PREFIX/drive_c/users/$(whoami)/AppData/Roaming/ShootersPool/settings"
 mkdir -p "$GFX_DIR"
-
-# Run game briefly to generate default settings, then kill
-echo "  Generating default settings..."
-env -u DISPLAY \
-    WINEPREFIX="$PREFIX" \
-    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
-    "$WINE" "$GAME_EXE" &
-sleep 10
-cleanup_wine
-
-# Write gfx.ini
-GFX_INI="$GFX_DIR/gfx.ini"
-cat > "$GFX_INI" << EOF
+cat > "$GFX_DIR/gfx.ini" << EOF
 {
     "screen_res_x_full": "$RES_X",
     "screen_res_y_full": "$RES_Y",
@@ -265,7 +221,7 @@ cat > "$GFX_INI" << EOF
     "sndMenuFx": "12"
 }
 EOF
-echo "  gfx.ini configured: ${RES_X}x${RES_Y}@${REFRESH}Hz, fullscreen, no decorations"
+echo "  gfx.ini: ${RES_X}x${RES_Y}@${REFRESH}Hz fullscreen"
 
 cleanup_wine
 

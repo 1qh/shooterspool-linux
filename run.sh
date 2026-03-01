@@ -4,10 +4,12 @@ set -euo pipefail
 # =============================================================================
 # ShootersPool Online — Launch (Wine 11 + Native Wayland)
 #
-# Launches the game fullscreen without decorations using Wine's native
-# Wayland driver. The DISPLAY env var is deliberately unset to force
-# Wine to use winewayland.so instead of XWayland — this avoids the
-# IncorrectSoundFormat crash that occurs under X11.
+# CRITICAL: The game must be launched from its bin/ directory.
+#   It uses relative path "..\\data\\" to find assets.
+#   Wrong CWD = VC++ Runtime Error (files not found).
+#
+# The DISPLAY env var is deliberately unset to force Wine to use
+# winewayland.so (native Wayland) instead of XWayland.
 #
 # Usage: ./run.sh
 # =============================================================================
@@ -16,38 +18,31 @@ set -euo pipefail
 PREFIX="$HOME/.local/share/shooterspool"
 WINE="/opt/wine-stable/bin/wine"
 WINESERVER="/opt/wine-stable/bin/wineserver"
-GAME_EXE="$PREFIX/drive_c/Program Files (x86)/ShootersPool/bin/ShootersPool Online.exe"
+GAME_BIN="$PREFIX/drive_c/Program Files (x86)/ShootersPool/bin"
+GAME_EXE="ShootersPool Online.exe"
 
 # --- Validate -----------------------------------------------------------------
-[[ -x "$WINE" ]]    || { echo "ERROR: Wine not found at $WINE — run install.sh first"; exit 1; }
-[[ -d "$PREFIX" ]]   || { echo "ERROR: Prefix not found at $PREFIX — run install.sh first"; exit 1; }
-[[ -f "$GAME_EXE" ]] || {
+[[ -x "$WINE" ]]             || { echo "ERROR: Wine not found at $WINE — run install.sh first"; exit 1; }
+[[ -d "$PREFIX" ]]            || { echo "ERROR: Prefix not found at $PREFIX — run install.sh first"; exit 1; }
+[[ -f "$GAME_BIN/$GAME_EXE" ]] || {
     # Try alternate location
-    ALT="$PREFIX/drive_c/Program Files/ShootersPool/bin/ShootersPool Online.exe"
-    [[ -f "$ALT" ]] && GAME_EXE="$ALT" || { echo "ERROR: Game exe not found — run install.sh first"; exit 1; }
+    ALT="$PREFIX/drive_c/Program Files/ShootersPool/bin"
+    [[ -f "$ALT/$GAME_EXE" ]] && GAME_BIN="$ALT" || { echo "ERROR: Game exe not found — run install.sh first"; exit 1; }
 }
 
-# --- Cleanup any previous instances -------------------------------------------
-echo "Cleaning up previous instances..."
-"$WINESERVER" -k 2>/dev/null || true
-kill -9 $(ps aux | grep -i "wine\|shooters\|wineserver\|winedevice\|CrUtility\|Graphics" | grep -v grep | awk '{print $2}') 2>/dev/null || true
-sleep 2
+# --- Cleanup previous instances -----------------------------------------------
+WINEPREFIX="$PREFIX" "$WINESERVER" -k 2>/dev/null || true
+sleep 1
 
-REMAINING=$(ps aux | grep -i "wine\|shooters\|wineserver\|winedevice\|CrUtility\|Graphics" | grep -v grep | wc -l)
-if [[ "$REMAINING" -gt 0 ]]; then
-    echo "  WARNING: $REMAINING processes still running, force killing..."
-    kill -9 $(ps aux | grep -i "wine\|shooters\|wineserver\|winedevice\|CrUtility\|Graphics" | grep -v grep | awk '{print $2}') 2>/dev/null || true
-    sleep 2
-fi
-echo "  Clean"
+# --- Launch from bin/ directory (CRITICAL for relative path resolution) --------
+echo "Launching ShootersPool Online..."
+echo "  CWD: $GAME_BIN"
+echo "  Wayland: ${WAYLAND_DISPLAY:-wayland-0}"
 
-# --- Launch -------------------------------------------------------------------
-echo "Launching ShootersPool Online (Wine Wayland, fullscreen)..."
-echo "  Prefix: $PREFIX"
-echo "  Exe: $GAME_EXE"
-
+cd "$GAME_BIN"
 exec env -u DISPLAY \
     WINEPREFIX="$PREFIX" \
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
-    "$WINE" "$GAME_EXE"
+    WINEDEBUG=-all \
+    "$WINE" "./$GAME_EXE"
