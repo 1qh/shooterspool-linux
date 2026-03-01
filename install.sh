@@ -73,15 +73,18 @@ env -u DISPLAY WINEPREFIX="$PREFIX" WINEARCH=win64 "$WINE" wineboot --init 2>/de
 sleep 2
 echo "  Prefix created: $PREFIX (win64)"
 
-# --- 3. Configure Wine for native Wayland -------------------------------------
-echo "[3/8] Configuring Wine for Wayland..."
+# --- 3. Configure Wine display drivers ----------------------------------------
+echo "[3/8] Configuring Wine display..."
+# X11 driver for NVIDIA GLX (primary — used by run.sh via XWayland)
 env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
-    "HKCU\\Software\\Wine\\Drivers" /v Graphics /t REG_SZ /d wayland /f 2>/dev/null
-# No window decorations (titlebar/border)
+    "HKCU\\Software\\Wine\\X11 Driver" /v Decorated /t REG_SZ /d N /f 2>/dev/null
+env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
+    "HKCU\\Software\\Wine\\X11 Driver" /v Managed /t REG_SZ /d N /f 2>/dev/null
+# Wayland driver as fallback (for Intel/AMD systems without NVIDIA)
 env -u DISPLAY WINEPREFIX="$PREFIX" "$WINE" reg add \
     "HKCU\\Software\\Wine\\Wayland Driver" /v Decorated /t REG_SZ /d N /f 2>/dev/null
 "$WINESERVER" -w 2>/dev/null || true
-echo "  Wayland driver configured, decorations disabled"
+echo "  X11 + Wayland drivers configured, decorations disabled"
 
 # --- 4. Install core fonts ---------------------------------------------------
 echo "[4/8] Installing Windows core fonts..."
