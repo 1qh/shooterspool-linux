@@ -1,8 +1,4 @@
-# wine-games
-
 Run Windows games on Linux via Wine 11, with automatic GPU detection for hybrid NVIDIA/Intel setups.
-
-https://github.com/1qh/wine-games
 
 ---
 
